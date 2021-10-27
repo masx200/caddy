@@ -617,8 +617,7 @@ func automationPolicyShadows(i int, aps []*caddytls.AutomationPolicy) int {
 // that this allows domains with multiple wildcard levels like '*.*.example.com' to qualify
 // if the automation policy has OnDemand enabled (i.e. this function is more lenient).
 func subjectQualifiesForPublicCert(ap *caddytls.AutomationPolicy, subj string) bool {
-	return !certmagic.SubjectIsIP(subj) &&
-		!certmagic.SubjectIsInternal(subj) &&
+	return !certmagic.SubjectIsInternal(subj) &&
 		(strings.Count(subj, "*.") < 2 || ap.OnDemand)
 }
 
