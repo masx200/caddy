@@ -453,7 +453,7 @@ func manageIdentity(ctx Context, cfg *Config) error {
 	}
 
 	logger := Log().Named("admin.identity")
-	cmCfg := cfg.Admin.Identity.certmagicConfig(logger, true)
+	cmCfg := cfg.Admin.Identity.certmagicConfig(logger, cfg.storage, true)
 
 	// issuers have circular dependencies with the configs because,
 	// as explained in the caddytls package, they need access to the
@@ -522,7 +522,7 @@ func replaceRemoteAdminServer(ctx Context, cfg *Config) error {
 	if identityCertCache == nil {
 		return fmt.Errorf("cannot enable remote admin without a certificate cache; configure identity management to initialize a certificate cache")
 	}
-	cmCfg := cfg.Admin.Identity.certmagicConfig(remoteLogger, false)
+	cmCfg := cfg.Admin.Identity.certmagicConfig(remoteLogger, cfg.storage, false)
 	tlsConfig := cmCfg.TLSConfig()
 	tlsConfig.NextProtos = nil // this server does not solve ACME challenges
 	tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -571,7 +571,7 @@ func replaceRemoteAdminServer(ctx Context, cfg *Config) error {
 	return nil
 }
 
-func (ident *IdentityConfig) certmagicConfig(logger *zap.Logger, makeCache bool) *certmagic.Config {
+func (ident *IdentityConfig) certmagicConfig(logger *zap.Logger, storage certmagic.Storage, makeCache bool) *certmagic.Config {
 	var cmCfg *certmagic.Config
 	if ident == nil {
 		// user might not have configured identity; that's OK, we can still make a
@@ -579,7 +579,7 @@ func (ident *IdentityConfig) certmagicConfig(logger *zap.Logger, makeCache bool)
 		ident = new(IdentityConfig)
 	}
 	template := certmagic.Config{
-		Storage: DefaultStorage, // do not act as part of a cluster (this is for the server's local identity)
+		Storage: storage,
 		Logger:  logger,
 		Issuers: ident.issuers,
 	}
@@ -608,7 +608,7 @@ func (ctx Context) IdentityCredentials(logger *zap.Logger) ([]tls.Certificate, e
 	if logger == nil {
 		logger = Log()
 	}
-	magic := ident.certmagicConfig(logger, false)
+	magic := ident.certmagicConfig(logger, ctx.cfg.storage, false)
 	return magic.ClientCredentials(ctx, ident.Identifiers)
 }
 
