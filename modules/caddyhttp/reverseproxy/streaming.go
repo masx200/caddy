@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	weakrand "math/rand"
 	"mime"
 	"net/http"
@@ -35,6 +36,8 @@ import (
 )
 
 func (h *Handler) handleUpgradeResponse(logger *zap.Logger, rw http.ResponseWriter, req *http.Request, res *http.Response) {
+	logger.Debug("*** upgrading response")
+
 	reqUpType := upgradeType(req.Header)
 	resUpType := upgradeType(res.Header)
 
@@ -195,6 +198,7 @@ func (h Handler) copyResponse(dst http.ResponseWriter, src io.Reader, flushInter
 			latency: flushInterval,
 		}
 		defer mlw.stop()
+		h.logger.Debug("*** using maxLatencyWriter")
 
 		// set up initial timer so headers get flushed even if body writes are delayed
 		mlw.flushPending = true
@@ -217,6 +221,7 @@ func (h Handler) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, er
 	}
 	var written int64
 	for {
+		h.logger.Debug("*** iterating in copyBuffer")
 		nr, rerr := src.Read(buf)
 		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
 			// TODO: this could be useful to know (indeed, it revealed an error in our
@@ -242,6 +247,7 @@ func (h Handler) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, er
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
+				h.logger.Debug("*** done reading from source")
 				return written, nil
 			}
 			return written, fmt.Errorf("reading: %w", rerr)
@@ -289,6 +295,7 @@ func (h *Handler) closeConnections() error {
 				err = gracefulErr
 			}
 		}
+		h.logger.Debug("*** closing connection")
 		closeErr := oc.conn.Close()
 		if closeErr != nil && err == nil {
 			err = closeErr
@@ -460,6 +467,7 @@ func (m *maxLatencyWriter) Write(p []byte) (n int, err error) {
 	n, err = m.dst.Write(p)
 	if m.latency < 0 {
 		//nolint:errcheck
+		log.Println("*** flushing maxLatencyWriter (A)", m.latency)
 		m.flush()
 		return
 	}
@@ -469,6 +477,7 @@ func (m *maxLatencyWriter) Write(p []byte) (n int, err error) {
 	if m.t == nil {
 		m.t = time.AfterFunc(m.latency, m.delayedFlush)
 	} else {
+		log.Println("*** resetting maxLatencyWriter", m.latency)
 		m.t.Reset(m.latency)
 	}
 	m.flushPending = true
@@ -482,6 +491,7 @@ func (m *maxLatencyWriter) delayedFlush() {
 		return
 	}
 	//nolint:errcheck
+	log.Println("*** flushing maxLatencyWriter (B)")
 	m.flush()
 	m.flushPending = false
 }

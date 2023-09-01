@@ -772,6 +772,7 @@ func (h *Handler) reverseProxy(rw http.ResponseWriter, req *http.Request, origRe
 	// regardless, and we should expect client disconnection in low-latency streaming
 	// scenarios (see issue #4922)
 	if h.FlushInterval == -1 {
+		h.logger.Debug("*** removing cancellation from request context")
 		req = req.WithContext(ignoreClientGoneContext{req.Context()})
 	}
 
@@ -826,6 +827,7 @@ func (h *Handler) reverseProxy(rw http.ResponseWriter, req *http.Request, origRe
 
 	// if enabled, buffer the response body
 	if h.ResponseBuffers != 0 {
+		h.logger.Debug("*** buffering response body")
 		res.Body, _ = h.bufferedBody(res.Body, h.ResponseBuffers)
 	}
 
@@ -915,6 +917,8 @@ func (h *Handler) finalizeResponse(
 	start time.Time,
 	logger *zap.Logger,
 ) error {
+	logger.Debug("*** finalizing response")
+
 	// deal with 101 Switching Protocols responses: (WebSocket, h2c, etc)
 	if res.StatusCode == http.StatusSwitchingProtocols {
 		h.handleUpgradeResponse(logger, rw, req, res)
@@ -950,8 +954,11 @@ func (h *Handler) finalizeResponse(
 
 	rw.WriteHeader(res.StatusCode)
 
+	logger.Debug("*** wrote header")
+
 	err := h.copyResponse(rw, res.Body, h.flushInterval(req, res))
-	res.Body.Close() // close now, instead of defer, to populate res.Trailer
+	err2 := res.Body.Close() // close now, instead of defer, to populate res.Trailer
+	h.logger.Debug("*** response body closed", zap.Error(err2))
 	if err != nil {
 		// we're streaming the response and we've already written headers, so
 		// there's nothing an error handler can do to recover at this point;
@@ -962,6 +969,7 @@ func (h *Handler) finalizeResponse(
 	}
 
 	if len(res.Trailer) > 0 {
+		h.logger.Debug("*** flushing trailers")
 		// Force chunking if we saw a response trailer.
 		// This prevents net/http from calculating the length for short
 		// bodies and adding a Content-Length.
