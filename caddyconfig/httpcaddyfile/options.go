@@ -110,7 +110,7 @@ func parseOptOrder(d *caddyfile.Dispenser, _ any) (any, error) {
 		if !d.Next() {
 			return nil, d.ArgErr()
 		}
-		pos := d.Val()
+		pos := Positional(d.Val())
 
 		// if directive exists, first remove it
 		for i, d := range newOrder {
@@ -122,22 +122,22 @@ func parseOptOrder(d *caddyfile.Dispenser, _ any) (any, error) {
 
 		// act on the positional
 		switch pos {
-		case "first":
+		case First:
 			newOrder = append([]string{dirName}, newOrder...)
 			if d.NextArg() {
 				return nil, d.ArgErr()
 			}
 			directiveOrder = newOrder
 			return newOrder, nil
-		case "last":
+		case Last:
 			newOrder = append(newOrder, dirName)
 			if d.NextArg() {
 				return nil, d.ArgErr()
 			}
 			directiveOrder = newOrder
 			return newOrder, nil
-		case "before":
-		case "after":
+		case Before:
+		case After:
 		default:
 			return nil, d.Errf("unknown positional '%s'", pos)
 		}
@@ -154,9 +154,9 @@ func parseOptOrder(d *caddyfile.Dispenser, _ any) (any, error) {
 		// insert directive into proper position
 		for i, d := range newOrder {
 			if d == otherDir {
-				if pos == "before" {
+				if pos == Before {
 					newOrder = append(newOrder[:i], append([]string{dirName}, newOrder[i:]...)...)
-				} else if pos == "after" {
+				} else if pos == After {
 					newOrder = append(newOrder[:i+1], append([]string{dirName}, newOrder[i+1:]...)...)
 				}
 				break
