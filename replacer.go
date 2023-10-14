@@ -35,6 +35,7 @@ func NewReplacer() *Replacer {
 	}
 	rep.providers = []ReplacerFunc{
 		globalDefaultReplacements,
+		fileReplacements,
 		rep.fromStatic,
 	}
 	return rep
@@ -58,6 +59,24 @@ func NewEmptyReplacer() *Replacer {
 type Replacer struct {
 	providers []ReplacerFunc
 	static    map[string]any
+}
+
+// WithoutFile returns a copy of the current Replacer
+// without support for the {file.*} placeholder, which
+// may be unsafe in some contexts.
+func (r *Replacer) WithoutFile() *Replacer {
+	rep := &Replacer{static: r.static}
+
+	// Add a func at the front of the list that
+	// always skips file placeholders
+	rep.providers = append(
+		[]ReplacerFunc{func(key string) (any, bool) {
+			return nil, strings.HasPrefix(key, filePrefix)
+		}},
+		r.providers...,
+	)
+
+	return rep
 }
 
 // Map adds mapFunc to the list of value providers.
@@ -297,28 +316,35 @@ func ToString(val any) string {
 // returned.
 type ReplacerFunc func(key string) (any, bool)
 
+// fileReplacements handles {file.*} replacements, reading
+// a file from disk and replacing with its contents.
+func fileReplacements(key string) (any, bool) {
+	if !strings.HasPrefix(key, filePrefix) {
+		return nil, false
+	}
+
+	filename := key[len(filePrefix):]
+	maxSize := 1024 * 1024
+	body, err := readFileIntoBuffer(filename, maxSize)
+	if err != nil {
+		wd, _ := os.Getwd()
+		Log().Error("placeholder: failed to read file",
+			zap.String("file", filename),
+			zap.String("working_dir", wd),
+			zap.Error(err))
+		return nil, true
+	}
+	return body, true
+}
+
+// globalDefaultReplacements handles replacements that can
+// be used in any context, such as system variables, time,
+// or environment variables.
 func globalDefaultReplacements(key string) (any, bool) {
 	// check environment variable
 	const envPrefix = "env."
 	if strings.HasPrefix(key, envPrefix) {
 		return os.Getenv(key[len(envPrefix):]), true
-	}
-
-	// check files
-	const filePrefix = "file."
-	if strings.HasPrefix(key, filePrefix) {
-		filename := key[len(filePrefix):]
-		maxSize := 1024 * 1024
-		body, err := readFileIntoBuffer(filename, maxSize)
-		if err != nil {
-			wd, _ := os.Getwd()
-			Log().Error("placeholder: failed to read file",
-				zap.String("file", filename),
-				zap.String("working_dir", wd),
-				zap.Error(err))
-			return nil, true
-		}
-		return body, true
 	}
 
 	switch key {
@@ -390,3 +416,5 @@ var nowFunc = time.Now
 const ReplacerCtxKey CtxKey = "replacer"
 
 const phOpen, phClose, phEscape = '{', '}', '\\'
+
+const filePrefix = "file."
