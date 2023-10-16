@@ -33,10 +33,10 @@ func NewReplacer() *Replacer {
 	rep := &Replacer{
 		static: make(map[string]any),
 	}
-	rep.providers = []ReplacerFunc{
-		globalDefaultReplacements,
-		fileReplacements,
-		rep.fromStatic,
+	rep.providers = []replacementProvider{
+		globalDefaultReplacementProvider{},
+		fileReplacementProvider{},
+		ReplacerFunc(rep.fromStatic),
 	}
 	return rep
 }
@@ -47,8 +47,8 @@ func NewEmptyReplacer() *Replacer {
 	rep := &Replacer{
 		static: make(map[string]any),
 	}
-	rep.providers = []ReplacerFunc{
-		rep.fromStatic,
+	rep.providers = []replacementProvider{
+		ReplacerFunc(rep.fromStatic),
 	}
 	return rep
 }
@@ -57,7 +57,7 @@ func NewEmptyReplacer() *Replacer {
 // A default/empty Replacer is not valid;
 // use NewReplacer to make one.
 type Replacer struct {
-	providers []ReplacerFunc
+	providers []replacementProvider
 	static    map[string]any
 }
 
@@ -66,16 +66,12 @@ type Replacer struct {
 // may be unsafe in some contexts.
 func (r *Replacer) WithoutFile() *Replacer {
 	rep := &Replacer{static: r.static}
-
-	// Add a func at the front of the list that
-	// always skips file placeholders
-	rep.providers = append(
-		[]ReplacerFunc{func(key string) (any, bool) {
-			return nil, strings.HasPrefix(key, filePrefix)
-		}},
-		r.providers...,
-	)
-
+	for _, v := range r.providers {
+		if _, ok := v.(fileReplacementProvider); ok {
+			continue
+		}
+		rep.providers = append(rep.providers, v)
+	}
 	return rep
 }
 
@@ -94,7 +90,7 @@ func (r *Replacer) Set(variable string, value any) {
 // the value and whether the variable was known.
 func (r *Replacer) Get(variable string) (any, bool) {
 	for _, mapFunc := range r.providers {
-		if val, ok := mapFunc(variable); ok {
+		if val, ok := mapFunc.replace(variable); ok {
 			return val, true
 		}
 	}
@@ -309,16 +305,28 @@ func ToString(val any) string {
 	}
 }
 
-// ReplacerFunc is a function that returns a replacement
-// for the given key along with true if the function is able
-// to service that key (even if the value is blank). If the
-// function does not recognize the key, false should be
-// returned.
+// ReplacerFunc is a function that returns a replacement for the
+// given key along with true if the function is able to service
+// that key (even if the value is blank). If the function does
+// not recognize the key, false should be returned.
 type ReplacerFunc func(key string) (any, bool)
 
-// fileReplacements handles {file.*} replacements, reading
-// a file from disk and replacing with its contents.
-func fileReplacements(key string) (any, bool) {
+func (f ReplacerFunc) replace(key string) (any, bool) {
+	return f(key)
+}
+
+// replacementProvider is a type that can provide replacements
+// for placeholders. Allows for type assertion to determine
+// which type of provider it is.
+type replacementProvider interface {
+	replace(key string) (any, bool)
+}
+
+// fileReplacementsProvider handles {file.*} replacements,
+// reading a file from disk and replacing with its contents.
+type fileReplacementProvider struct{}
+
+func (f fileReplacementProvider) replace(key string) (any, bool) {
 	if !strings.HasPrefix(key, filePrefix) {
 		return nil, false
 	}
@@ -337,10 +345,12 @@ func fileReplacements(key string) (any, bool) {
 	return string(body), true
 }
 
-// globalDefaultReplacements handles replacements that can
-// be used in any context, such as system variables, time,
-// or environment variables.
-func globalDefaultReplacements(key string) (any, bool) {
+// globalDefaultReplacementsProvider handles replacements
+// that can be used in any context, such as system variables,
+// time, or environment variables.
+type globalDefaultReplacementProvider struct{}
+
+func (f globalDefaultReplacementProvider) replace(key string) (any, bool) {
 	// check environment variable
 	const envPrefix = "env."
 	if strings.HasPrefix(key, envPrefix) {
