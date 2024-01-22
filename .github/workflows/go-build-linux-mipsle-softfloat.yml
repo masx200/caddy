@@ -30,7 +30,7 @@ jobs:
           cd ../../
       - name: Release
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/heads/main')
+        if: startsWith(github.ref, 'refs/heads/master')
         with:
           tag_name: Continuous-integration-${{ github.sha }}
           #token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
