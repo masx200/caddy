@@ -25,7 +25,9 @@ jobs:
         run: |
 
           CC=mips-linux-gcc GOOS=linux GOARCH=mipsle CGO_ENABLED=0 GOMIPS=softfloat go build -v -ldflags="-w -s" -o ./dist/linux-mipsle-softfloat/caddy ./cmd/caddy/main.go
-          tar --directory=./dist/linux-mipsle-softfloat zcvf ./dist/caddy-linux-mipsle-softfloat.tgz ./dist/linux-mipsle-softfloat/caddy
+          cd ./dist/linux-mipsle-softfloat/
+          tar  zcvf ../../dist/caddy-linux-mipsle-softfloat.tgz ./*
+          cd ../../
       - name: Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/heads/main')
