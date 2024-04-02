@@ -65,14 +65,13 @@ func (ce *ConsoleEncoder) Provision(_ caddy.Context) error {
 // See the godoc on the LogEncoderConfig type for the syntax of
 // subdirectives that are common to most/all encoders.
 func (ce *ConsoleEncoder) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	for d.Next() {
-		if d.NextArg() {
-			return d.ArgErr()
-		}
-		err := ce.LogEncoderConfig.UnmarshalCaddyfile(d)
-		if err != nil {
-			return err
-		}
+	d.Next() // consume encoder name
+	if d.NextArg() {
+		return d.ArgErr()
+	}
+	err := ce.LogEncoderConfig.UnmarshalCaddyfile(d)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -106,31 +105,39 @@ func (je *JSONEncoder) Provision(_ caddy.Context) error {
 // See the godoc on the LogEncoderConfig type for the syntax of
 // subdirectives that are common to most/all encoders.
 func (je *JSONEncoder) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	for d.Next() {
-		if d.NextArg() {
-			return d.ArgErr()
-		}
-		err := je.LogEncoderConfig.UnmarshalCaddyfile(d)
-		if err != nil {
-			return err
-		}
+	d.Next() // consume encoder name
+	if d.NextArg() {
+		return d.ArgErr()
+	}
+	err := je.LogEncoderConfig.UnmarshalCaddyfile(d)
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 // LogEncoderConfig holds configuration common to most encoders.
 type LogEncoderConfig struct {
-	MessageKey     *string `json:"message_key,omitempty"`
-	LevelKey       *string `json:"level_key,omitempty"`
-	TimeKey        *string `json:"time_key,omitempty"`
-	NameKey        *string `json:"name_key,omitempty"`
-	CallerKey      *string `json:"caller_key,omitempty"`
-	StacktraceKey  *string `json:"stacktrace_key,omitempty"`
-	LineEnding     *string `json:"line_ending,omitempty"`
-	TimeFormat     string  `json:"time_format,omitempty"`
-	TimeLocal      bool    `json:"time_local,omitempty"`
-	DurationFormat string  `json:"duration_format,omitempty"`
-	LevelFormat    string  `json:"level_format,omitempty"`
+	MessageKey    *string `json:"message_key,omitempty"`
+	LevelKey      *string `json:"level_key,omitempty"`
+	TimeKey       *string `json:"time_key,omitempty"`
+	NameKey       *string `json:"name_key,omitempty"`
+	CallerKey     *string `json:"caller_key,omitempty"`
+	StacktraceKey *string `json:"stacktrace_key,omitempty"`
+	LineEnding    *string `json:"line_ending,omitempty"`
+
+	// Recognized values are: unix_seconds_float, unix_milli_float, unix_nano, iso8601, rfc3339, rfc3339_nano, wall, wall_milli, wall_nano, common_log.
+	// The value may also be custom format per the Go `time` package layout specification, as described [here](https://pkg.go.dev/time#pkg-constants).
+	TimeFormat string `json:"time_format,omitempty"`
+	TimeLocal  bool   `json:"time_local,omitempty"`
+
+	// Recognized values are: s/second/seconds, ns/nano/nanos, ms/milli/millis, string.
+	// Empty and unrecognized value default to seconds.
+	DurationFormat string `json:"duration_format,omitempty"`
+
+	// Recognized values are: lower, upper, color.
+	// Empty and unrecognized value default to lower.
+	LevelFormat string `json:"level_format,omitempty"`
 }
 
 // UnmarshalCaddyfile populates the struct from Caddyfile tokens. Syntax:
@@ -149,7 +156,7 @@ type LogEncoderConfig struct {
 //	    level_format    <format>
 //	}
 func (lec *LogEncoderConfig) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	for nesting := d.Nesting(); d.NextBlock(nesting); {
+	for d.NextBlock(0) {
 		subdir := d.Val()
 		switch subdir {
 		case "time_local":
@@ -262,12 +269,16 @@ func (lec *LogEncoderConfig) ZapcoreEncoderConfig() zapcore.EncoderConfig {
 	// duration format
 	var durFormatter zapcore.DurationEncoder
 	switch lec.DurationFormat {
-	case "", "seconds":
+	case "s", "second", "seconds":
 		durFormatter = zapcore.SecondsDurationEncoder
-	case "nano":
+	case "ns", "nano", "nanos":
 		durFormatter = zapcore.NanosDurationEncoder
+	case "ms", "milli", "millis":
+		durFormatter = zapcore.MillisDurationEncoder
 	case "string":
 		durFormatter = zapcore.StringDurationEncoder
+	default:
+		durFormatter = zapcore.SecondsDurationEncoder
 	}
 	cfg.EncodeDuration = durFormatter
 

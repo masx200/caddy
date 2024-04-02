@@ -65,8 +65,11 @@ func (st ServerType) Setup(
 	originalServerBlocks := make([]serverBlock, 0, len(inputServerBlocks))
 	for _, sblock := range inputServerBlocks {
 		for j, k := range sblock.Keys {
-			if j == 0 && strings.HasPrefix(k, "@") {
-				return nil, warnings, fmt.Errorf("cannot define a matcher outside of a site block: '%s'", k)
+			if j == 0 && strings.HasPrefix(k.Text, "@") {
+				return nil, warnings, fmt.Errorf("%s:%d: cannot define a matcher outside of a site block: '%s'", k.File, k.Line, k.Text)
+			}
+			if _, ok := registeredDirectives[k.Text]; ok {
+				return nil, warnings, fmt.Errorf("%s:%d: parsed '%s' as a site address, but it is a known directive; directives must appear in a site block", k.File, k.Line, k.Text)
 			}
 		}
 		originalServerBlocks = append(originalServerBlocks, serverBlock{
@@ -490,7 +493,7 @@ func (ServerType) extractNamedRoutes(
 			route.HandlersRaw = []json.RawMessage{caddyconfig.JSONModuleObject(handler, "handler", subroute.CaddyModule().ID.Name(), h.warnings)}
 		}
 
-		namedRoutes[sb.block.Keys[0]] = &route
+		namedRoutes[sb.block.GetKeysText()[0]] = &route
 	}
 	options["named_routes"] = namedRoutes
 
@@ -528,12 +531,12 @@ func (st *ServerType) serversFromPairings(
 		// address), otherwise their routes will improperly be added
 		// to the same server (see issue #4635)
 		for j, sblock1 := range p.serverBlocks {
-			for _, key := range sblock1.block.Keys {
+			for _, key := range sblock1.block.GetKeysText() {
 				for k, sblock2 := range p.serverBlocks {
 					if k == j {
 						continue
 					}
-					if sliceContains(sblock2.block.Keys, key) {
+					if sliceContains(sblock2.block.GetKeysText(), key) {
 						return nil, fmt.Errorf("ambiguous site definition: %s", key)
 					}
 				}
@@ -1381,68 +1384,73 @@ func (st *ServerType) compileEncodedMatcherSets(sblock serverBlock) ([]caddy.Mod
 }
 
 func parseMatcherDefinitions(d *caddyfile.Dispenser, matchers map[string]caddy.ModuleMap) error {
-	for d.Next() {
-		// this is the "name" for "named matchers"
-		definitionName := d.Val()
+	d.Next() // advance to the first token
 
-		if _, ok := matchers[definitionName]; ok {
-			return fmt.Errorf("matcher is defined more than once: %s", definitionName)
+	// this is the "name" for "named matchers"
+	definitionName := d.Val()
+
+	if _, ok := matchers[definitionName]; ok {
+		return fmt.Errorf("matcher is defined more than once: %s", definitionName)
+	}
+	matchers[definitionName] = make(caddy.ModuleMap)
+
+	// given a matcher name and the tokens following it, parse
+	// the tokens as a matcher module and record it
+	makeMatcher := func(matcherName string, tokens []caddyfile.Token) error {
+		mod, err := caddy.GetModule("http.matchers." + matcherName)
+		if err != nil {
+			return fmt.Errorf("getting matcher module '%s': %v", matcherName, err)
 		}
-		matchers[definitionName] = make(caddy.ModuleMap)
+		unm, ok := mod.New().(caddyfile.Unmarshaler)
+		if !ok {
+			return fmt.Errorf("matcher module '%s' is not a Caddyfile unmarshaler", matcherName)
+		}
+		err = unm.UnmarshalCaddyfile(caddyfile.NewDispenser(tokens))
+		if err != nil {
+			return err
+		}
+		rm, ok := unm.(caddyhttp.RequestMatcher)
+		if !ok {
+			return fmt.Errorf("matcher module '%s' is not a request matcher", matcherName)
+		}
+		matchers[definitionName][matcherName] = caddyconfig.JSON(rm, nil)
+		return nil
+	}
 
-		// given a matcher name and the tokens following it, parse
-		// the tokens as a matcher module and record it
-		makeMatcher := func(matcherName string, tokens []caddyfile.Token) error {
-			mod, err := caddy.GetModule("http.matchers." + matcherName)
-			if err != nil {
-				return fmt.Errorf("getting matcher module '%s': %v", matcherName, err)
-			}
-			unm, ok := mod.New().(caddyfile.Unmarshaler)
-			if !ok {
-				return fmt.Errorf("matcher module '%s' is not a Caddyfile unmarshaler", matcherName)
-			}
-			err = unm.UnmarshalCaddyfile(caddyfile.NewDispenser(tokens))
+	// if the next token is quoted, we can assume it's not a matcher name
+	// and that it's probably an 'expression' matcher
+	if d.NextArg() {
+		if d.Token().Quoted() {
+			// since it was missing the matcher name, we insert a token
+			// in front of the expression token itself
+			err := makeMatcher("expression", []caddyfile.Token{
+				{Text: "expression", File: d.File(), Line: d.Line()},
+				d.Token(),
+			})
 			if err != nil {
 				return err
 			}
-			rm, ok := unm.(caddyhttp.RequestMatcher)
-			if !ok {
-				return fmt.Errorf("matcher module '%s' is not a request matcher", matcherName)
-			}
-			matchers[definitionName][matcherName] = caddyconfig.JSON(rm, nil)
 			return nil
 		}
 
-		// if the next token is quoted, we can assume it's not a matcher name
-		// and that it's probably an 'expression' matcher
-		if d.NextArg() {
-			if d.Token().Quoted() {
-				err := makeMatcher("expression", []caddyfile.Token{d.Token()})
-				if err != nil {
-					return err
-				}
-				continue
-			}
+		// if it wasn't quoted, then we need to rewind after calling
+		// d.NextArg() so the below properly grabs the matcher name
+		d.Prev()
+	}
 
-			// if it wasn't quoted, then we need to rewind after calling
-			// d.NextArg() so the below properly grabs the matcher name
-			d.Prev()
-		}
-
-		// in case there are multiple instances of the same matcher, concatenate
-		// their tokens (we expect that UnmarshalCaddyfile should be able to
-		// handle more than one segment); otherwise, we'd overwrite other
-		// instances of the matcher in this set
-		tokensByMatcherName := make(map[string][]caddyfile.Token)
-		for nesting := d.Nesting(); d.NextArg() || d.NextBlock(nesting); {
-			matcherName := d.Val()
-			tokensByMatcherName[matcherName] = append(tokensByMatcherName[matcherName], d.NextSegment()...)
-		}
-		for matcherName, tokens := range tokensByMatcherName {
-			err := makeMatcher(matcherName, tokens)
-			if err != nil {
-				return err
-			}
+	// in case there are multiple instances of the same matcher, concatenate
+	// their tokens (we expect that UnmarshalCaddyfile should be able to
+	// handle more than one segment); otherwise, we'd overwrite other
+	// instances of the matcher in this set
+	tokensByMatcherName := make(map[string][]caddyfile.Token)
+	for nesting := d.Nesting(); d.NextArg() || d.NextBlock(nesting); {
+		matcherName := d.Val()
+		tokensByMatcherName[matcherName] = append(tokensByMatcherName[matcherName], d.NextSegment()...)
+	}
+	for matcherName, tokens := range tokensByMatcherName {
+		err := makeMatcher(matcherName, tokens)
+		if err != nil {
+			return err
 		}
 	}
 	return nil

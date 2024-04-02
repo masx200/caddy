@@ -112,6 +112,17 @@ func (fsrv *FileServer) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			fsrv.Browse = new(Browse)
 			d.Args(&fsrv.Browse.TemplateFile)
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				switch d.Val() {
+				case "reveal_symlinks":
+					if fsrv.Browse.RevealSymlinks {
+						return d.Err("Symlinks path reveal is already enabled")
+					}
+					fsrv.Browse.RevealSymlinks = true
+				default:
+					return d.Errf("unknown subdirective '%s'", d.Val())
+				}
+			}
 
 		case "precompressed":
 			var order []string
@@ -223,7 +234,7 @@ func parseTryFiles(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error) 
 
 	// parse out the optional try policy
 	var tryPolicy string
-	for nesting := h.Nesting(); h.NextBlock(nesting); {
+	for h.NextBlock(0) {
 		switch h.Val() {
 		case "policy":
 			if tryPolicy != "" {
