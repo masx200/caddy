@@ -38,7 +38,7 @@ require (
 	go.uber.org/zap/exp v0.2.0
 	golang.org/x/crypto v0.21.0
 	golang.org/x/exp v0.0.0-20231214170342-aacd6d4b4611
-	golang.org/x/net v0.22.0
+	golang.org/x/net v0.23.0
 	golang.org/x/sync v0.6.0
 	golang.org/x/term v0.18.0
 	golang.org/x/time v0.5.0
