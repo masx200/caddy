@@ -4,7 +4,7 @@ Caddyfile
 Caddyfile.*
 !caddyfile/
 !caddyfile.go
-
+*.exe
 # artifacts from pprof tooling
 *.prof
 *.test
