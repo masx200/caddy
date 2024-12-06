@@ -27,6 +27,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyevents"
@@ -81,6 +82,27 @@ type TLS struct {
 	// EXPERIMENTAL. Subject to change.
 	DisableOCSPStapling bool `json:"disable_ocsp_stapling,omitempty"`
 
+	// Disables checks in certmagic that the configured storage is ready
+	// and able to handle writing new content to it. These checks are
+	// intended to prevent information loss (newly issued certificates), but
+	// can be expensive on the storage.
+	//
+	// Disabling these checks should only be done when the storage
+	// can be trusted to have enough capacity and no other problems.
+	// EXPERIMENTAL. Subject to change.
+	DisableStorageCheck bool `json:"disable_storage_check,omitempty"`
+
+	// Disables the automatic cleanup of the storage backend.
+	// This is useful when TLS is not being used to store certificates
+	// and the user wants run their server in a read-only mode.
+	//
+	// Storage cleaning creates two files: instance.uuid and last_clean.json.
+	// The instance.uuid file is used to identify the instance of Caddy
+	// in a cluster. The last_clean.json file is used to store the last
+	// time the storage was cleaned.
+	// EXPERIMENTAL. Subject to change.
+	DisableStorageClean bool `json:"disable_storage_clean,omitempty"`
+
 	certificateLoaders []CertificateLoader
 	automateNames      []string
 	ctx                caddy.Context
@@ -91,7 +113,8 @@ type TLS struct {
 
 	// set of subjects with managed certificates,
 	// and hashes of manually-loaded certificates
-	managing, loaded map[string]struct{}
+	// (managing's value is an optional issuer key, for distinction)
+	managing, loaded map[string]string
 }
 
 // CaddyModule returns the Caddy module information.
@@ -112,7 +135,7 @@ func (t *TLS) Provision(ctx caddy.Context) error {
 	t.ctx = ctx
 	t.logger = ctx.Logger()
 	repl := caddy.NewReplacer()
-	t.managing, t.loaded = make(map[string]struct{}), make(map[string]struct{})
+	t.managing, t.loaded = make(map[string]string), make(map[string]string)
 
 	// set up a new certificate cache; this (re)loads all certificates
 	cacheOpts := certmagic.CacheOptions{
@@ -176,22 +199,19 @@ func (t *TLS) Provision(ctx caddy.Context) error {
 		t.Automation.OnDemand.permission = val.(OnDemandPermission)
 	}
 
-	// on-demand rate limiting
-	if t.Automation != nil && t.Automation.OnDemand != nil && t.Automation.OnDemand.RateLimit != nil {
-		onDemandRateLimiter.SetMaxEvents(t.Automation.OnDemand.RateLimit.Burst)
-		onDemandRateLimiter.SetWindow(time.Duration(t.Automation.OnDemand.RateLimit.Interval))
-	} else {
-		// remove any existing rate limiter
-		onDemandRateLimiter.SetWindow(0)
-		onDemandRateLimiter.SetMaxEvents(0)
-	}
-
 	// run replacer on ask URL (for environment variables) -- return errors to prevent surprises (#5036)
 	if t.Automation != nil && t.Automation.OnDemand != nil && t.Automation.OnDemand.Ask != "" {
 		t.Automation.OnDemand.Ask, err = repl.ReplaceOrErr(t.Automation.OnDemand.Ask, true, true)
 		if err != nil {
 			return fmt.Errorf("preparing 'ask' endpoint: %v", err)
 		}
+		perm := PermissionByHTTP{
+			Endpoint: t.Automation.OnDemand.Ask,
+		}
+		if err := perm.Provision(ctx); err != nil {
+			return fmt.Errorf("provisioning 'ask' module: %v", err)
+		}
+		t.Automation.OnDemand.permission = perm
 	}
 
 	// automation/management policies
@@ -246,6 +266,7 @@ func (t *TLS) Provision(ctx caddy.Context) error {
 		OCSP: certmagic.OCSPConfig{
 			DisableStapling: t.DisableOCSPStapling,
 		},
+		DisableStorageCheck: t.DisableStorageCheck,
 	})
 	certCacheMu.RUnlock()
 	for _, loader := range t.certificateLoaders {
@@ -258,7 +279,7 @@ func (t *TLS) Provision(ctx caddy.Context) error {
 			if err != nil {
 				return fmt.Errorf("caching unmanaged certificate: %v", err)
 			}
-			t.loaded[hash] = struct{}{}
+			t.loaded[hash] = ""
 		}
 	}
 
@@ -303,8 +324,9 @@ func (t *TLS) Start() error {
 	if t.Automation.OnDemand == nil || (t.Automation.OnDemand.Ask == "" && t.Automation.OnDemand.permission == nil) {
 		for _, ap := range t.Automation.Policies {
 			if ap.OnDemand && ap.isWildcardOrDefault() {
-				t.logger.Warn("YOUR SERVER MAY BE VULNERABLE TO ABUSE: on-demand TLS is enabled, but no protections are in place",
-					zap.String("docs", "https://caddyserver.com/docs/automatic-https#on-demand-tls"))
+				if c := t.logger.Check(zapcore.WarnLevel, "YOUR SERVER MAY BE VULNERABLE TO ABUSE: on-demand TLS is enabled, but no protections are in place"); c != nil {
+					c.Write(zap.String("docs", "https://caddyserver.com/docs/automatic-https#on-demand-tls"))
+				}
 				break
 			}
 		}
@@ -317,7 +339,11 @@ func (t *TLS) Start() error {
 		return fmt.Errorf("automate: managing %v: %v", t.automateNames, err)
 	}
 
-	t.keepStorageClean()
+	if !t.DisableStorageClean {
+		// start the storage cleaner goroutine and ticker,
+		// which cleans out expired certificates and more
+		t.keepStorageClean()
+	}
 
 	return nil
 }
@@ -344,16 +370,33 @@ func (t *TLS) Cleanup() error {
 	// if a new TLS app was loaded, remove certificates from the cache that are no longer
 	// being managed or loaded by the new config; if there is no more TLS app running,
 	// then stop cert maintenance and let the cert cache be GC'ed
-	if nextTLS := caddy.ActiveContext().AppIfConfigured("tls"); nextTLS != nil {
+	if nextTLS, err := caddy.ActiveContext().AppIfConfigured("tls"); err == nil && nextTLS != nil {
 		nextTLSApp := nextTLS.(*TLS)
 
 		// compute which certificates were managed or loaded into the cert cache by this
 		// app instance (which is being stopped) that are not managed or loaded by the
 		// new app instance (which just started), and remove them from the cache
-		var noLongerManaged, noLongerLoaded []string
-		for subj := range t.managing {
-			if _, ok := nextTLSApp.managing[subj]; !ok {
-				noLongerManaged = append(noLongerManaged, subj)
+		var noLongerManaged []certmagic.SubjectIssuer
+		var reManage, noLongerLoaded []string
+		for subj, currentIssuerKey := range t.managing {
+			// It's a bit nuanced: managed certs can sometimes be different enough that we have to
+			// swap them out for a different one, even if they are for the same subject/domain.
+			// We consider "private" certs (internal CA/locally-trusted/etc) to be significantly
+			// distinct from "public" certs (production CAs/globally-trusted/etc) because of the
+			// implications when it comes to actual deployments: switching between an internal CA
+			// and a production CA, for example, is quite significant. Switching from one public CA
+			// to another, however, is not, and for our purposes we consider those to be the same.
+			// Anyway, if the next TLS app does not manage a cert for this name at all, definitely
+			// remove it from the cache. But if it does, and it's not the same kind of issuer/CA
+			// as we have, also remove it, so that it can swap it out for the right one.
+			if nextIssuerKey, ok := nextTLSApp.managing[subj]; !ok || nextIssuerKey != currentIssuerKey {
+				// next app is not managing a cert for this domain at all or is using a different issuer, so remove it
+				noLongerManaged = append(noLongerManaged, certmagic.SubjectIssuer{Subject: subj, IssuerKey: currentIssuerKey})
+
+				// then, if the next app is managing a cert for this name, but with a different issuer, re-manage it
+				if ok && nextIssuerKey != currentIssuerKey {
+					reManage = append(reManage, subj)
+				}
 			}
 		}
 		for hash := range t.loaded {
@@ -362,10 +405,22 @@ func (t *TLS) Cleanup() error {
 			}
 		}
 
+		// remove the certs
 		certCacheMu.RLock()
 		certCache.RemoveManaged(noLongerManaged)
 		certCache.Remove(noLongerLoaded)
 		certCacheMu.RUnlock()
+
+		// give the new TLS app a "kick" to manage certs that it is configured for
+		// with its own configuration instead of the one we just evicted
+		if err := nextTLSApp.Manage(reManage); err != nil {
+			if c := t.logger.Check(zapcore.ErrorLevel, "re-managing unloaded certificates with new config"); c != nil {
+				c.Write(
+					zap.Strings("subjects", reManage),
+					zap.Error(err),
+				)
+			}
+		}
 	} else {
 		// no more TLS app running, so delete in-memory cert cache
 		certCache.Stop()
@@ -396,45 +451,76 @@ func (t *TLS) Manage(names []string) error {
 	for ap, names := range policyToNames {
 		err := ap.magic.ManageAsync(t.ctx.Context, names)
 		if err != nil {
+			const maxNamesToDisplay = 100
+			if len(names) > maxNamesToDisplay {
+				names = append(names[:maxNamesToDisplay], fmt.Sprintf("(%d more...)", len(names)-maxNamesToDisplay))
+			}
 			return fmt.Errorf("automate: manage %v: %v", names, err)
 		}
 		for _, name := range names {
-			t.managing[name] = struct{}{}
+			// certs that are issued solely by our internal issuer are a little bit of
+			// a special case: if you have an initial config that manages example.com
+			// using internal CA, then after testing it you switch to a production CA,
+			// you wouldn't want to keep using the same self-signed cert, obviously;
+			// so we differentiate these by associating the subject with its issuer key;
+			// we do this because CertMagic has no notion of "InternalIssuer" like we
+			// do, so we have to do this logic ourselves
+			var issuerKey string
+			if len(ap.Issuers) == 1 {
+				if intIss, ok := ap.Issuers[0].(*InternalIssuer); ok && intIss != nil {
+					issuerKey = intIss.IssuerKey()
+				}
+			}
+			t.managing[name] = issuerKey
 		}
 	}
 
 	return nil
 }
 
-// HandleHTTPChallenge ensures that the HTTP challenge is handled for the
-// certificate named by r.Host, if it is an HTTP challenge request. It
-// requires that the automation policy for r.Host has an issuer of type
-// *certmagic.ACMEManager, or one that is ACME-enabled (GetACMEIssuer()).
+// HandleHTTPChallenge ensures that the ACME HTTP challenge or ZeroSSL HTTP
+// validation request is handled for the certificate named by r.Host, if it
+// is an HTTP challenge request. It requires that the automation policy for
+// r.Host has an issuer that implements GetACMEIssuer() or is a *ZeroSSLIssuer.
 func (t *TLS) HandleHTTPChallenge(w http.ResponseWriter, r *http.Request) bool {
+	acmeChallenge := certmagic.LooksLikeHTTPChallenge(r)
+	zerosslValidation := certmagic.LooksLikeZeroSSLHTTPValidation(r)
+
 	// no-op if it's not an ACME challenge request
-	if !certmagic.LooksLikeHTTPChallenge(r) {
+	if !acmeChallenge && !zerosslValidation {
 		return false
 	}
 
 	// try all the issuers until we find the one that initiated the challenge
 	ap := t.getAutomationPolicyForName(r.Host)
-	type acmeCapable interface{ GetACMEIssuer() *ACMEIssuer }
-	for _, iss := range ap.magic.Issuers {
-		if am, ok := iss.(acmeCapable); ok {
-			iss := am.GetACMEIssuer()
-			if iss.issuer.HandleHTTPChallenge(w, r) {
-				return true
+
+	if acmeChallenge {
+		type acmeCapable interface{ GetACMEIssuer() *ACMEIssuer }
+
+		for _, iss := range ap.magic.Issuers {
+			if acmeIssuer, ok := iss.(acmeCapable); ok {
+				if acmeIssuer.GetACMEIssuer().issuer.HandleHTTPChallenge(w, r) {
+					return true
+				}
 			}
 		}
-	}
 
-	// it's possible another server in this process initiated the challenge;
-	// users have requested that Caddy only handle HTTP challenges it initiated,
-	// so that users can proxy the others through to their backends; but we
-	// might not have an automation policy for all identifiers that are trying
-	// to get certificates (e.g. the admin endpoint), so we do this manual check
-	if challenge, ok := certmagic.GetACMEChallenge(r.Host); ok {
-		return certmagic.SolveHTTPChallenge(t.logger, w, r, challenge.Challenge)
+		// it's possible another server in this process initiated the challenge;
+		// users have requested that Caddy only handle HTTP challenges it initiated,
+		// so that users can proxy the others through to their backends; but we
+		// might not have an automation policy for all identifiers that are trying
+		// to get certificates (e.g. the admin endpoint), so we do this manual check
+		if challenge, ok := certmagic.GetACMEChallenge(r.Host); ok {
+			return certmagic.SolveHTTPChallenge(t.logger, w, r, challenge.Challenge)
+		}
+	} else if zerosslValidation {
+		for _, iss := range ap.magic.Issuers {
+			if ziss, ok := iss.(*ZeroSSLIssuer); ok {
+				if ziss.issuer.HandleZeroSSLHTTPValidation(w, r) {
+					return true
+				}
+			}
+		}
 	}
 
 	return false
@@ -580,7 +666,9 @@ func (t *TLS) cleanStorageUnits() {
 
 	id, err := caddy.InstanceID()
 	if err != nil {
-		t.logger.Warn("unable to get instance ID; storage clean stamps will be incomplete", zap.Error(err))
+		if c := t.logger.Check(zapcore.WarnLevel, "unable to get instance ID; storage clean stamps will be incomplete"); c != nil {
+			c.Write(zap.Error(err))
+		}
 	}
 	options := certmagic.CleanStorageOptions{
 		Logger:                 t.logger,
@@ -596,7 +684,9 @@ func (t *TLS) cleanStorageUnits() {
 	if err != nil {
 		// probably don't want to return early, since we should still
 		// see if any other storages can get cleaned up
-		t.logger.Error("could not clean default/global storage", zap.Error(err))
+		if c := t.logger.Check(zapcore.ErrorLevel, "could not clean default/global storage"); c != nil {
+			c.Write(zap.Error(err))
+		}
 	}
 
 	// then clean each storage defined in ACME automation policies
@@ -606,7 +696,9 @@ func (t *TLS) cleanStorageUnits() {
 				continue
 			}
 			if err := certmagic.CleanStorage(t.ctx, ap.storage, options); err != nil {
-				t.logger.Error("could not clean storage configured in automation policy", zap.Error(err))
+				if c := t.logger.Check(zapcore.ErrorLevel, "could not clean storage configured in automation policy"); c != nil {
+					c.Write(zap.Error(err))
+				}
 			}
 		}
 	}

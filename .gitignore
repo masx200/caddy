@@ -3,6 +3,7 @@ _gitignore/
 Caddyfile
 Caddyfile.*
 !caddyfile/
+!caddyfile.go
 
 # artifacts from pprof tooling
 *.prof
@@ -28,4 +29,3 @@ caddy-dist
 # IDE files
 .idea/
 .vscode/
-*.exe

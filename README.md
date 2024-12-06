@@ -56,7 +56,7 @@
 </p>
 
 
-## [Features](https://caddyserver.com/v2)
+## [Features](https://caddyserver.com/features)
 
 - **Easy configuration** with the [Caddyfile](https://caddyserver.com/docs/caddyfile)
 - **Powerful configuration** with its [native JSON config](https://caddyserver.com/docs/json/)
@@ -75,7 +75,7 @@
 - **Runs anywhere** with **no external dependencies** (not even libc)
 - Written in Go, a language with higher **memory safety guarantees** than other servers
 - Actually **fun to use**
-- So much more to [discover](https://caddyserver.com/v2)
+- So much more to [discover](https://caddyserver.com/features)
 
 ## Install
 
@@ -87,7 +87,7 @@ See [our online documentation](https://caddyserver.com/docs/install) for other i
 
 Requirements:
 
-- [Go 1.21 or newer](https://golang.org/dl/)
+- [Go 1.22.3 or newer](https://golang.org/dl/)
 
 ### For development
 
@@ -131,7 +131,7 @@ $ xcaddy build
 4. Initialize a Go module: `go mod init caddy`
 5. (Optional) Pin Caddy version: `go get github.com/caddyserver/caddy/v2@version` replacing `version` with a git tag, commit, or branch name.
 6. (Optional) Add plugins by adding their import: `_ "import/path/here"`
-7. Compile: `go build`
+7. Compile: `go build -tags=nobadger,nomysql,nopgx`
 
 
 
