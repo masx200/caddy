@@ -199,7 +199,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
           args: check
@@ -212,7 +212,7 @@ jobs:
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           xcaddy version
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
           args: build --single-target --snapshot
